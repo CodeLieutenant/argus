@@ -21,7 +21,7 @@ except ImportError:
     PrivateFormat = None
     PublicFormat = None
 
-from argus.client.tunnel_models import TunnelClientError, TunnelConfig, TunnelStatePaths, parse_datetime
+from .models import TunnelClientError, TunnelConfig, TunnelStatePaths, parse_datetime
 
 
 LOGGER = logging.getLogger(__name__)
