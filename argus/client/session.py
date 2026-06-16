@@ -27,6 +27,45 @@ def _resolve_use_tunnel(use_tunnel: bool | None) -> bool:
     return os.environ.get("ARGUS_USE_TUNNEL", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# Upper bound on the build-id header value to keep the backend's per-build
+# Prometheus label cardinality bounded even if a client sends junk.
+_MAX_BUILD_ID_LEN = 256
+
+
+def _resolve_build_id() -> str | None:
+    """Resolve a human-identifiable build id for tunnel attribution.
+
+    Order of preference:
+
+    1. ``ARGUS_BUILD_ID`` — explicit override, used verbatim.
+    2. Jenkins ``JOB_NAME`` (full folder path) combined with ``BUILD_NUMBER``
+       when available, formatted as ``job/path#42`` for easy identification.
+
+    Returns ``None`` outside CI so the ``X-Argus-Build-Id`` header is simply
+    omitted.
+    """
+    override = os.environ.get("ARGUS_BUILD_ID", "").strip()
+    if override:
+        return override[:_MAX_BUILD_ID_LEN]
+
+    job_name = os.environ.get("JOB_NAME", "").strip()
+    if not job_name:
+        return None
+    build_number = os.environ.get("BUILD_NUMBER", "").strip()
+    build_id = f"{job_name}#{build_number}" if build_number else job_name
+    return build_id[:_MAX_BUILD_ID_LEN]
+
+
+def _resolve_build_url() -> str | None:
+    """Jenkins ``BUILD_URL`` (or ``ARGUS_BUILD_URL`` override) for the run.
+
+    Carried as ``X-Argus-Build-Url`` so the Grafana ``build_id`` series can link
+    straight back to the originating build. ``None`` when not running in CI.
+    """
+    value = (os.environ.get("ARGUS_BUILD_URL") or os.environ.get("BUILD_URL") or "").strip()
+    return value[:_MAX_BUILD_ID_LEN * 2] if value else None
+
+
 def _resolve_monitor_interval() -> float:
     raw = os.environ.get("ARGUS_TUNNEL_MONITOR_INTERVAL")
     if raw is None:
@@ -82,6 +121,8 @@ class TunneledSession(requests.Session):
 
         self._auth_token = auth_token
         self._original_base_url = original_base_url
+        self._build_id = _resolve_build_id()
+        self._build_url = _resolve_build_url()
 
         self._tunnel: SSHTunnel | None = None
         self._tunnel_config: TunnelConfig | None = None
@@ -252,6 +293,10 @@ class TunneledSession(requests.Session):
         }
         if self._tunnel_config.key_id:
             headers["X-Forwarded-Key-ID"] = self._tunnel_config.key_id
+        if self._build_id:
+            headers["X-Argus-Build-Id"] = self._build_id
+        if self._build_url:
+            headers["X-Argus-Build-Url"] = self._build_url
         return headers
 
     def request(self, method: str, url: str, *args, **kwargs) -> requests.Response:

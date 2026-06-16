@@ -79,6 +79,21 @@ def register_metrics():
             },
         )
     )
+    METRICS.register_default(
+        METRICS.counter(
+            "http_request_tunnel_build_total",
+            "Tunneled requests by Jenkins build/job id (X-Argus-Build-Id)",
+            labels={
+                # One series per Jenkins build (job/path#42). Requests without the
+                # header (non-tunnel or pre-attribution clients) fall into the
+                # "unknown" bucket and are filtered out in dashboards.
+                "build_id": lambda: request.headers.get("X-Argus-Build-Id") or "unknown",
+                # 1:1 with build_id (no extra series) — carried so Grafana can
+                # link the build_id straight back to the Jenkins build.
+                "build_url": lambda: request.headers.get("X-Argus-Build-Url") or "",
+            },
+        )
+    )
 
 
 def start_server(config=None) -> Flask:
