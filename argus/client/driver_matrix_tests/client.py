@@ -1,13 +1,13 @@
 from uuid import UUID
 from argus.common.enums import TestStatus
-from argus.client.base import ArgusClient
+from argus.client.base import ArgusReplayLogClient
 
 
-class ArgusDriverMatrixClient(ArgusClient):
+class ArgusDriverMatrixClient(ArgusReplayLogClient):
     test_type = "driver-matrix-tests"
     schema_version: None = "v2"
 
-    class Routes(ArgusClient.Routes):
+    class Routes(ArgusReplayLogClient.Routes):
         SUBMIT_DRIVER_RESULT = "/driver_matrix/result/submit"
         SUBMIT_DRIVER_FAILURE = "/driver_matrix/result/fail"
         SUBMIT_ENV = "/driver_matrix/env/submit"

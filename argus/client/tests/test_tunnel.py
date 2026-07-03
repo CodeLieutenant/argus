@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from argus.client.base import ArgusClient
+from argus.client.base import ArgusAPIClient
 from argus.client.tunnel import api as tunnel_api
 from argus.client.tunnel import ssh as tunnel_ssh
 from argus.client.tunnel import state as tunnel_state
@@ -222,7 +222,7 @@ def test_establish_retries_on_local_bind_conflict(tunnel_state_dir, monkeypatch)
     assert call_state["calls"] == 2
 
 
-def test_argus_client_warns_and_falls_back_when_tunnel_setup_fails(requests_mock, monkeypatch, caplog, tmp_path):
+def test_argus_client_warns_and_falls_back_when_tunnel_setup_fails(requests_mock, monkeypatch, caplog):
     requests_mock.get(
         "https://argus.scylladb.com/api/v1/client/testrun/test-type/test-id/get",
         json={"status": "ok", "response": {}},
@@ -231,10 +231,10 @@ def test_argus_client_warns_and_falls_back_when_tunnel_setup_fails(requests_mock
 
     monkeypatch.setattr("argus.client.session.resolve_tunnel_config_with_reason", lambda **kwargs: (None, "api unreachable"))
 
-    client = ArgusClient(auth_token="token", base_url="https://argus.scylladb.com", log_dir=tmp_path, use_tunnel=True)
+    client = ArgusAPIClient(auth_token="token", base_url="https://argus.scylladb.com", use_tunnel=True)
     with caplog.at_level("WARNING"):
         response = client.get(
-            endpoint=ArgusClient.Routes.GET,
+            endpoint=ArgusAPIClient.Routes.GET,
             location_params={"type": "test-type", "id": "test-id"},
         )
 
@@ -244,7 +244,7 @@ def test_argus_client_warns_and_falls_back_when_tunnel_setup_fails(requests_mock
     assert "falling back to direct connection" in caplog.text
 
 
-def test_argus_client_retries_tunnel_after_cooldown(requests_mock, monkeypatch, tmp_path):
+def test_argus_client_retries_tunnel_after_cooldown(requests_mock, monkeypatch):
     requests_mock.get(
         "https://argus.scylladb.com/api/v1/client/testrun/test-type/test-id/get",
         json={"status": "ok", "response": {}},
@@ -294,24 +294,24 @@ def test_argus_client_retries_tunnel_after_cooldown(requests_mock, monkeypatch, 
     monkeypatch.setattr("argus.client.session.SSHTunnel", _FakeTunnel)
     monkeypatch.setattr("argus.client.session.time.monotonic", lambda: next(monotonic_values))
 
-    client = ArgusClient(auth_token="token", base_url="https://argus.scylladb.com", log_dir=tmp_path, use_tunnel=True)
+    client = ArgusAPIClient(auth_token="token", base_url="https://argus.scylladb.com", use_tunnel=True)
 
-    client.get(endpoint=ArgusClient.Routes.GET, location_params={"type": "test-type", "id": "test-id"})
+    client.get(endpoint=ArgusAPIClient.Routes.GET, location_params={"type": "test-type", "id": "test-id"})
     assert client.session._tunnel_port is None
     assert client._base_url == "https://argus.scylladb.com"
 
-    client.get(endpoint=ArgusClient.Routes.GET, location_params={"type": "test-type", "id": "test-id"})
+    client.get(endpoint=ArgusAPIClient.Routes.GET, location_params={"type": "test-type", "id": "test-id"})
     assert client.session._tunnel_port == 9191
 
 
-def test_request_level_recovery_reconnects_and_retries_once(requests_mock, monkeypatch, tmp_path):
+def test_request_level_recovery_reconnects_and_retries_once(requests_mock, monkeypatch):
     old_tunnel_url = "http://127.0.0.1:9191/api/v1/client/testrun/test-type/test-id/get"
     new_tunnel_url = "http://127.0.0.1:9292/api/v1/client/testrun/test-type/test-id/get"
 
     requests_mock.get(old_tunnel_url, exc=tunnel_api.requests.ConnectionError("old tunnel is down"))
     requests_mock.get(new_tunnel_url, json={"status": "ok", "response": {}}, status_code=200)
 
-    client = ArgusClient(auth_token="token", base_url="https://argus.scylladb.com", log_dir=tmp_path, use_tunnel=True)
+    client = ArgusAPIClient(auth_token="token", base_url="https://argus.scylladb.com", use_tunnel=True)
     client.session._tunnel_port = 9191
 
     ensure_state = {"calls": 0}
@@ -324,7 +324,7 @@ def test_request_level_recovery_reconnects_and_retries_once(requests_mock, monke
     monkeypatch.setattr(client.session, "_ensure_tunnel", _fake_ensure_tunnel)
 
     response = client.get(
-        endpoint=ArgusClient.Routes.GET,
+        endpoint=ArgusAPIClient.Routes.GET,
         location_params={"type": "test-type", "id": "test-id"},
     )
 
@@ -333,14 +333,14 @@ def test_request_level_recovery_reconnects_and_retries_once(requests_mock, monke
     assert client.session._tunnel_port == 9292
 
 
-def test_request_level_recovery_falls_back_to_direct_when_retry_fails(requests_mock, monkeypatch, tmp_path):
+def test_request_level_recovery_falls_back_to_direct_when_retry_fails(requests_mock, monkeypatch):
     direct_url = "https://argus.scylladb.com/api/v1/client/testrun/test-type/test-id/get"
     tunnel_url = "http://127.0.0.1:9191/api/v1/client/testrun/test-type/test-id/get"
 
     requests_mock.get(tunnel_url, exc=tunnel_api.requests.ConnectionError("tunnel is dead"))
     requests_mock.get(direct_url, json={"status": "ok", "response": {}}, status_code=200)
 
-    client = ArgusClient(auth_token="token", base_url="https://argus.scylladb.com", log_dir=tmp_path, use_tunnel=True)
+    client = ArgusAPIClient(auth_token="token", base_url="https://argus.scylladb.com", use_tunnel=True)
     client.session._tunnel_port = 9191
 
     def _ensure_keeps_tunnel():
@@ -356,7 +356,7 @@ def test_request_level_recovery_falls_back_to_direct_when_retry_fails(requests_m
     monkeypatch.setattr(client.session, "_backoff", _fake_backoff)
 
     response = client.get(
-        endpoint=ArgusClient.Routes.GET,
+        endpoint=ArgusAPIClient.Routes.GET,
         location_params={"type": "test-type", "id": "test-id"},
     )
 
@@ -448,7 +448,7 @@ def test_tunnel_headers_omit_build_id_and_url_when_unset(monkeypatch):
         session.close()
 
 
-def test_argus_client_works_as_context_manager(requests_mock, monkeypatch, tmp_path):
+def test_argus_client_works_as_context_manager(requests_mock, monkeypatch):
     requests_mock.get(
         "https://argus.scylladb.com/api/v1/client/testrun/test-type/test-id/get",
         json={"status": "ok", "response": {}},
@@ -459,8 +459,8 @@ def test_argus_client_works_as_context_manager(requests_mock, monkeypatch, tmp_p
         lambda **kwargs: (None, "api unreachable"),
     )
 
-    with ArgusClient(auth_token="token", base_url="https://argus.scylladb.com", log_dir=tmp_path, use_tunnel=True) as client:
-        client.get(endpoint=ArgusClient.Routes.GET, location_params={"type": "test-type", "id": "test-id"})
+    with ArgusAPIClient(auth_token="token", base_url="https://argus.scylladb.com", use_tunnel=True) as client:
+        client.get(endpoint=ArgusAPIClient.Routes.GET, location_params={"type": "test-type", "id": "test-id"})
         session = client.session
         assert session._monitor_thread.is_alive()
 

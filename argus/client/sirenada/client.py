@@ -7,7 +7,7 @@ from xml.etree import ElementTree
 
 from argus.common.sirenada_types import RawSirenadaRequest, RawSirenadaTestCase
 
-from argus.client.base import ArgusClient
+from argus.client.base import ArgusReplayLogClient
 
 
 LOGGER = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class TestCredentials(TypedDict):
     region: str
 
 
-class ArgusSirenadaClient(ArgusClient):
+class ArgusSirenadaClient(ArgusReplayLogClient):
     test_type = "sirenada"
     schema_version: None = "v1"
     _junit_xml_filename = "junit_results.xml"

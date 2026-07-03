@@ -1,41 +1,38 @@
-"""Tests for timeout and retry functionality in ArgusClient."""
+"""Tests for timeout and retry functionality in ArgusAPIClient."""
 from unittest.mock import patch
 from uuid import uuid4
 
-from argus.client.base import ArgusClient
+from argus.client.base import ArgusAPIClient
 from argus.client.sct.client import ArgusSCTClient
 from argus.client.generic.client import ArgusGenericClient
 from argus.client.driver_matrix_tests.client import ArgusDriverMatrixClient
 from argus.client.sirenada.client import ArgusSirenadaClient
 
 
-def test_argus_client_default_timeout(tmp_path):
-    """Test that ArgusClient uses default timeout of 60 seconds."""
-    client = ArgusClient(
+def test_argus_client_default_timeout():
+    """Test that ArgusAPIClient uses default timeout of 60 seconds."""
+    client = ArgusAPIClient(
         auth_token="test_token",
         base_url="https://test.example.com",
-        log_dir=tmp_path,
     )
     assert client._timeout == 60
 
 
-def test_argus_client_custom_timeout(tmp_path):
-    """Test that ArgusClient accepts custom timeout."""
-    client = ArgusClient(
+def test_argus_client_custom_timeout():
+    """Test that ArgusAPIClient accepts custom timeout."""
+    client = ArgusAPIClient(
         auth_token="test_token",
         base_url="https://test.example.com",
-        log_dir=tmp_path,
         timeout=120
     )
     assert client._timeout == 120
 
 
-def test_argus_client_session_has_retry_adapter(tmp_path):
-    """Test that ArgusClient session is configured with retry adapter."""
-    client = ArgusClient(
+def test_argus_client_session_has_retry_adapter():
+    """Test that ArgusAPIClient session is configured with retry adapter."""
+    client = ArgusAPIClient(
         auth_token="test_token",
         base_url="https://test.example.com",
-        log_dir=tmp_path,
         max_retries=5
     )
 
@@ -51,7 +48,7 @@ def test_argus_client_session_has_retry_adapter(tmp_path):
     assert adapter.max_retries.status_forcelist == set()
 
 
-def test_get_request_uses_timeout(requests_mock, tmp_path):
+def test_get_request_uses_timeout(requests_mock):
     """Test that GET requests include timeout parameter."""
     requests_mock.get(
         "https://test.example.com/api/v1/client/testrun/test-type/test-id/get",
@@ -59,17 +56,16 @@ def test_get_request_uses_timeout(requests_mock, tmp_path):
         status_code=200
     )
 
-    client = ArgusClient(
+    client = ArgusAPIClient(
         auth_token="test_token",
         base_url="https://test.example.com",
-        log_dir=tmp_path,
         timeout=30
     )
 
     with patch.object(client.session, 'get', wraps=client.session.get) as mock_get:
         try:
             client.get(
-                endpoint=ArgusClient.Routes.GET,
+                endpoint=ArgusAPIClient.Routes.GET,
                 location_params={"type": "test-type", "id": "test-id"}
             )
         except Exception:
@@ -82,7 +78,7 @@ def test_get_request_uses_timeout(requests_mock, tmp_path):
         assert call_kwargs['timeout'] == 30
 
 
-def test_post_request_uses_timeout(requests_mock, tmp_path):
+def test_post_request_uses_timeout(requests_mock):
     """Test that POST requests include timeout parameter."""
     requests_mock.post(
         "https://test.example.com/api/v1/client/testrun/test-type/submit",
@@ -90,17 +86,16 @@ def test_post_request_uses_timeout(requests_mock, tmp_path):
         status_code=200
     )
 
-    client = ArgusClient(
+    client = ArgusAPIClient(
         auth_token="test_token",
         base_url="https://test.example.com",
-        log_dir=tmp_path,
         timeout=45
     )
 
     with patch.object(client.session, 'post', wraps=client.session.post) as mock_post:
         try:
             client.post(
-                endpoint=ArgusClient.Routes.SUBMIT,
+                endpoint=ArgusAPIClient.Routes.SUBMIT,
                 location_params={"type": "test-type"},
                 body={"test": "data"}
             )
@@ -114,12 +109,11 @@ def test_post_request_uses_timeout(requests_mock, tmp_path):
         assert call_kwargs['timeout'] == 45
 
 
-def test_retry_configuration_is_correct(tmp_path):
+def test_retry_configuration_is_correct():
     """Test that the retry adapter is correctly configured."""
-    client = ArgusClient(
+    client = ArgusAPIClient(
         auth_token="test_token",
         base_url="https://test.example.com",
-        log_dir=tmp_path,
         max_retries=5
     )
 

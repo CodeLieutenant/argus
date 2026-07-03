@@ -9,8 +9,8 @@ from uuid import uuid4
 
 import pytest
 
-from argus.client.base import ArgusClient
-from argus.client.replay_log import ReplayLog
+from argus.client.base import ArgusClient, ArgusReplayLogClient
+from argus.client.replay_log import ReplayLog, classify_response
 
 
 def _read_records(path):
@@ -33,46 +33,25 @@ class _RaisingFile:
         self.closed = True
 
 
-def test_replay_log_writes_preflight_and_final_record_per_call(tmp_path):
+def test_replay_log_writes_one_record_per_call(tmp_path):
     log = ReplayLog(log_dir=tmp_path, run_id="run-1", test_type="generic")
     with log.record("POST", "/foo/$id", {"id": "abc"}, None, {"k": "v"}) as rec:
-        rec.success = True
+        rec["success"] = True
     log.close()
 
     records = _read_records(log.path)
-    assert len(records) == 2
+    assert len(records) == 1
 
-    preflight, final = records
-    assert preflight["phase"] == "pending"
-    assert preflight["success"] is False
-    assert "error" not in preflight
-    assert final["phase"] == "final"
-    assert final["success"] is True
-
-    for r in records:
-        assert r["method"] == "POST"
-        assert r["endpoint"] == "/foo/$id"
-        assert r["location_params"] == {"id": "abc"}
-        assert r["params"] is None
-        assert r["body"] == {"k": "v"}
-        assert r["test_type"] == "generic"
-        assert isinstance(r["ts"], int)
-
-
-def test_replay_log_persists_preflight_entry_before_http_call_runs(tmp_path):
-    # Major-issue #3: even if the process is killed mid-call, the intended
-    # request must already be durable on disk before any HTTP call is made.
-    log = ReplayLog(log_dir=tmp_path, run_id="run-1", test_type="generic")
-    with log.record("POST", "/foo", None, None, {"k": "v"}) as rec:
-        on_disk = _read_records(log.path)
-        assert len(on_disk) == 1
-        assert on_disk[0]["phase"] == "pending"
-        assert on_disk[0]["success"] is False
-        assert on_disk[0]["body"] == {"k": "v"}
-        rec.success = True
-    log.close()
-
-    assert len(_read_records(log.path)) == 2
+    r = records[0]
+    assert r["success"] is True
+    assert "error" not in r
+    assert r["method"] == "POST"
+    assert r["endpoint"] == "/foo/$id"
+    assert r["location_params"] == {"id": "abc"}
+    assert r["params"] is None
+    assert r["body"] == {"k": "v"}
+    assert r["test_type"] == "generic"
+    assert isinstance(r["ts"], int)
 
 
 def test_replay_log_round_trips_non_none_params(tmp_path):
@@ -81,15 +60,15 @@ def test_replay_log_round_trips_non_none_params(tmp_path):
     query_params = {"limit": 50, "active": True}
     body = {"nested": {"a": [1, 2, 3]}, "name": "x"}
     with log.record("POST", "/foo/$id", location_params, query_params, body) as rec:
-        rec.success = True
+        rec["success"] = True
     log.close()
 
     records = _read_records(log.path)
-    assert len(records) == 2
-    for r in records:
-        assert r["location_params"] == location_params
-        assert r["params"] == query_params
-        assert r["body"] == body
+    assert len(records) == 1
+    r = records[0]
+    assert r["location_params"] == location_params
+    assert r["params"] == query_params
+    assert r["body"] == body
 
 
 def test_replay_log_captures_exception_as_error(tmp_path):
@@ -100,13 +79,9 @@ def test_replay_log_captures_exception_as_error(tmp_path):
     log.close()
 
     records = _read_records(log.path)
-    assert len(records) == 2
-    assert records[0]["phase"] == "pending"
+    assert len(records) == 1
     assert records[0]["success"] is False
-    assert "error" not in records[0]
-    assert records[1]["phase"] == "final"
-    assert records[1]["success"] is False
-    assert records[1]["error"].startswith("RuntimeError: boom")
+    assert records[0]["error"].startswith("RuntimeError: boom")
 
 
 def test_replay_log_filename_includes_run_id_and_ts(tmp_path):
@@ -141,7 +116,7 @@ def test_replay_log_creates_log_dir_if_missing(tmp_path):
 def test_replay_log_works_as_context_manager(tmp_path):
     with ReplayLog(log_dir=tmp_path, run_id="r", test_type="t") as log:
         with log.record("POST", "/x", None, None, {}) as rec:
-            rec.success = True
+            rec["success"] = True
         path = log.path
     assert _read_records(path)[-1]["success"] is True
 
@@ -155,7 +130,7 @@ def test_replay_log_is_thread_safe(tmp_path):
     def worker(tid):
         for i in range(per_thread):
             with log.record("POST", "/x", None, None, {"tid": tid, "i": i}) as rec:
-                rec.success = True
+                rec["success"] = True
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
     for t in threads:
@@ -165,12 +140,10 @@ def test_replay_log_is_thread_safe(tmp_path):
     log.close()
 
     records = _read_records(log.path)
-    # Each call writes a pre-flight + a final record.
-    assert len(records) == n_threads * per_thread * 2
-    # No partial lines / no JSON corruption.
-    finals = [r for r in records if r["success"] is True]
-    seen = {(r["body"]["tid"], r["body"]["i"]) for r in finals}
-    assert len(finals) == n_threads * per_thread
+    # One record per call -- no partial lines / no JSON corruption.
+    assert len(records) == n_threads * per_thread
+    assert all(r["success"] is True for r in records)
+    seen = {(r["body"]["tid"], r["body"]["i"]) for r in records}
     assert len(seen) == n_threads * per_thread
 
 
@@ -215,15 +188,17 @@ def test_replay_log_record_after_close_does_not_raise_and_still_runs_http_call(t
     ran = False
     with log.record("POST", "/x", None, None, {}) as rec:
         ran = True
-        rec.success = True
+        rec["success"] = True
     assert ran is True
     # Nothing should have been written -- the file is already closed.
     assert _read_records(log.path) == []
 
 
-def test_replay_log_close_waits_for_in_flight_record(tmp_path):
-    # Major-issue #2: close() must not drop a request that is still
-    # in-flight (already past the "is this closed" check) when it is called.
+def test_replay_log_close_does_not_wait_for_in_flight_record(tmp_path):
+    # There is no background thread or queue and no Condition-based wait
+    # here -- close() just takes the lock and closes the file immediately.
+    # A request already in flight when close() runs simply has its record
+    # dropped (and logged) rather than blocking close() until it finishes.
     log = ReplayLog(log_dir=tmp_path, run_id="r", test_type="t")
     entered = threading.Event()
     finish = threading.Event()
@@ -233,74 +208,53 @@ def test_replay_log_close_waits_for_in_flight_record(tmp_path):
         with log.record("POST", "/slow", None, None, {}) as rec:
             entered.set()
             finish.wait(timeout=5.0)
-            rec.success = True
+            rec["success"] = True
         result["done"] = True
 
     t = threading.Thread(target=worker)
     t.start()
     assert entered.wait(timeout=5.0)
 
-    def release_after_delay():
-        time.sleep(0.05)
-        finish.set()
+    close_started = time.monotonic()
+    log.close()
+    assert time.monotonic() - close_started < 1.0  # did not wait for the worker
 
-    threading.Thread(target=release_after_delay).start()
-    log.close(timeout=5.0)
+    finish.set()
     t.join(timeout=5.0)
-
     assert result.get("done") is True
-    records = _read_records(log.path)
-    assert len(records) == 2
-    assert records[-1]["success"] is True
+
+    # The worker's write happened after close() -- dropped, nothing on disk.
+    assert _read_records(log.path) == []
 
 
-def test_replay_log_close_timeout_logs_which_record_is_dropped(tmp_path, caplog):
-    # If close() times out with a request still running, the eventual final
-    # write is dropped -- but it must be logged with enough detail (method +
-    # endpoint) to identify what was lost, not just a bare count.
+def test_replay_log_write_after_close_logs_dropped_record(tmp_path, caplog):
     log = ReplayLog(log_dir=tmp_path, run_id="r", test_type="t")
-    entered = threading.Event()
-    finish = threading.Event()
-
-    def worker():
-        with log.record("POST", "/slow-endpoint", None, None, {}) as rec:
-            entered.set()
-            finish.wait(timeout=5.0)
-            rec.success = True
-
-    t = threading.Thread(target=worker)
-    t.start()
-    assert entered.wait(timeout=5.0)
+    log.close()
 
     with caplog.at_level(logging.WARNING, logger="argus.client.replay_log"):
-        log.close(timeout=0.01)
-        assert any("in-flight" in r.message for r in caplog.records)
+        with log.record("POST", "/slow-endpoint", None, None, {}) as rec:
+            rec["success"] = True
 
-        # The worker's final write happens after close() already gave up and
-        # closed the file -- that drop must be logged, identifying the request.
-        finish.set()
-        t.join(timeout=5.0)
-        assert any(
-            "/slow-endpoint" in r.message and "POST" in r.message for r in caplog.records
-        )
+    assert any(
+        "/slow-endpoint" in r.message and "POST" in r.message for r in caplog.records
+    )
 
 
-def test_replay_log_write_failure_does_not_raise_or_leak_active_count(tmp_path):
-    # Major-issue #4: a writer failure (e.g. ENOSPC/permission error) must
-    # not propagate into the caller, and there is no queue to leak memory in.
+def test_replay_log_write_failure_does_not_raise(tmp_path):
+    # A writer failure (e.g. ENOSPC/permission error) must not propagate
+    # into the caller.
     log = ReplayLog(log_dir=tmp_path, run_id="r", test_type="t")
     log._file.close()
     log._file = _RaisingFile()
 
     with log.record("POST", "/x", None, None, {}) as rec:
-        rec.success = True
+        rec["success"] = True
 
-    assert log._active == 0
     assert log._closed is False
     log.close()
 
 
-def test_replay_log_pre_flight_serialization_failure_does_not_block_http_call(tmp_path):
+def test_replay_log_serialization_failure_does_not_block_http_call(tmp_path):
     # A body that can't be JSON-serialized (even with default=str) must not
     # prevent the caller's real HTTP call from running.
     log = ReplayLog(log_dir=tmp_path, run_id="r", test_type="t")
@@ -310,7 +264,7 @@ def test_replay_log_pre_flight_serialization_failure_does_not_block_http_call(tm
     ran = False
     with log.record("POST", "/x", None, None, circular) as rec:
         ran = True
-        rec.success = True
+        rec["success"] = True
     assert ran is True
     log.close()
 
@@ -327,7 +281,7 @@ def test_replay_log_survives_unwritable_log_dir(tmp_path):
     ran = False
     with log.record("POST", "/x", None, None, {}) as rec:
         ran = True
-        rec.success = True
+        rec["success"] = True
     assert ran is True
     log.close()
 
@@ -400,7 +354,7 @@ def test_replay_log_close_only_unregisters_its_own_atexit_callback(tmp_path, mon
     assert unregistered == [log_a._atexit_callback, log_b._atexit_callback]
 
 
-def test_replay_record_uses_response_ok_gate(tmp_path):
+def test_classify_response_uses_ok_gate():
     # response.ok is True for any status < 400 (so 3xx passes the gate here,
     # unlike a strict 200-299 check) -- a JSON body still has to say "ok".
     class _FakeResponse:
@@ -410,15 +364,10 @@ def test_replay_record_uses_response_ok_gate(tmp_path):
         def json(self):
             return {"status": "ok"}
 
-    log = ReplayLog(log_dir=tmp_path, run_id="r", test_type="t")
-    with log.record("POST", "/x", None, None, {}) as rec:
-        rec.record(_FakeResponse())
-    log.close()
-
-    assert _read_records(log.path)[-1]["success"] is True
+    assert classify_response(_FakeResponse()) == (True, None)
 
 
-def test_replay_record_treats_4xx_5xx_as_failure(tmp_path):
+def test_classify_response_treats_4xx_5xx_as_failure():
     class _FakeResponse:
         status_code = 404
         ok = False
@@ -426,13 +375,39 @@ def test_replay_record_treats_4xx_5xx_as_failure(tmp_path):
         def json(self):
             return {"status": "ok"}
 
-    log = ReplayLog(log_dir=tmp_path, run_id="r", test_type="t")
-    with log.record("POST", "/x", None, None, {}) as rec:
-        rec.record(_FakeResponse())
-    log.close()
+    success, error = classify_response(_FakeResponse())
+    assert success is False
+    assert error == "HTTP 404"
 
-    assert _read_records(log.path)[-1]["success"] is False
-    assert _read_records(log.path)[-1]["error"] == "HTTP 404"
+
+def test_classify_response_treats_non_json_body_as_failure():
+    # Auth proxies (e.g. Cloudflare Access) return plain HTML for
+    # unauthenticated requests rather than the JSON envelope.
+    class _FakeResponse:
+        status_code = 200
+        ok = True
+
+        def json(self):
+            raise ValueError("not json")
+
+    success, error = classify_response(_FakeResponse())
+    assert success is False
+    assert "non-JSON" in error
+
+
+def test_classify_response_treats_2xx_with_error_status_as_failure():
+    # The Argus backend returns logical errors as HTTP 200 with
+    # ``{"status": "error", ...}`` (argus/backend/error_handlers.py).
+    class _FakeResponse:
+        status_code = 200
+        ok = True
+
+        def json(self):
+            return {"status": "error", "response": {"exception": "boom"}}
+
+    success, error = classify_response(_FakeResponse())
+    assert success is False
+    assert "status='error'" in error
 
 
 def test_argus_client_post_writes_replay_record(requests_mock, tmp_path):
@@ -441,26 +416,24 @@ def test_argus_client_post_writes_replay_record(requests_mock, tmp_path):
         json={"status": "ok"},
         status_code=200,
     )
-    client = ArgusClient(
+    client = ArgusReplayLogClient(
         auth_token="t",
         base_url="https://test.example.com",
         log_dir=tmp_path,
     )
     client.post(
-        endpoint=ArgusClient.Routes.SUBMIT,
+        endpoint=ArgusReplayLogClient.Routes.SUBMIT,
         location_params={"type": "test-type"},
         body={"hello": "world"},
     )
     client.close()
 
     records = _read_records(client.replay_log_path)
-    assert len(records) == 2
-    for r in records:
-        assert r["endpoint"] == ArgusClient.Routes.SUBMIT
-        assert r["location_params"] == {"type": "test-type"}
-        assert r["body"] == {"hello": "world"}
-    assert records[0]["success"] is False
-    assert records[1]["success"] is True
+    assert len(records) == 1
+    assert records[0]["endpoint"] == ArgusReplayLogClient.Routes.SUBMIT
+    assert records[0]["location_params"] == {"type": "test-type"}
+    assert records[0]["body"] == {"hello": "world"}
+    assert records[0]["success"] is True
 
 
 def test_argus_client_post_records_failure_on_non_2xx(requests_mock, tmp_path):
@@ -469,46 +442,46 @@ def test_argus_client_post_records_failure_on_non_2xx(requests_mock, tmp_path):
         json={"error": "boom"},
         status_code=500,
     )
-    client = ArgusClient(
+    client = ArgusReplayLogClient(
         auth_token="t",
         base_url="https://test.example.com",
         log_dir=tmp_path,
     )
     client.post(
-        endpoint=ArgusClient.Routes.SUBMIT,
+        endpoint=ArgusReplayLogClient.Routes.SUBMIT,
         location_params={"type": "test-type"},
         body={"hello": "world"},
     )
     client.close()
 
     records = _read_records(client.replay_log_path)
-    assert records[-1]["success"] is False
-    assert records[-1]["error"] == "HTTP 500"
+    assert len(records) == 1
+    assert records[0]["success"] is False
+    assert records[0]["error"] == "HTTP 500"
 
 
 def test_argus_client_post_records_2xx_with_error_status_as_failure(requests_mock, tmp_path):
-    # The Argus backend returns logical errors as HTTP 200 with
-    # ``{"status": "error", "response": {...}}`` (argus/backend/error_handlers.py).
     requests_mock.post(
         "https://test.example.com/api/v1/client/testrun/test-type/submit",
         json={"status": "error", "response": {"exception": "boom"}},
         status_code=200,
     )
-    client = ArgusClient(
+    client = ArgusReplayLogClient(
         auth_token="t",
         base_url="https://test.example.com",
         log_dir=tmp_path,
     )
     client.post(
-        endpoint=ArgusClient.Routes.SUBMIT,
+        endpoint=ArgusReplayLogClient.Routes.SUBMIT,
         location_params={"type": "test-type"},
         body={},
     )
     client.close()
 
     records = _read_records(client.replay_log_path)
-    assert records[-1]["success"] is False
-    assert "status='error'" in records[-1]["error"]
+    assert len(records) == 1
+    assert records[0]["success"] is False
+    assert "status='error'" in records[0]["error"]
 
 
 def test_argus_client_post_records_non_json_response_as_failure(requests_mock, tmp_path):
@@ -520,21 +493,22 @@ def test_argus_client_post_records_non_json_response_as_failure(requests_mock, t
         status_code=200,
         headers={"Content-Type": "text/html"},
     )
-    client = ArgusClient(
+    client = ArgusReplayLogClient(
         auth_token="t",
         base_url="https://test.example.com",
         log_dir=tmp_path,
     )
     client.post(
-        endpoint=ArgusClient.Routes.SUBMIT,
+        endpoint=ArgusReplayLogClient.Routes.SUBMIT,
         location_params={"type": "test-type"},
         body={},
     )
     client.close()
 
     records = _read_records(client.replay_log_path)
-    assert records[-1]["success"] is False
-    assert "non-JSON" in records[-1]["error"]
+    assert len(records) == 1
+    assert records[0]["success"] is False
+    assert "non-JSON" in records[0]["error"]
 
 
 def test_argus_client_post_records_401_unauthenticated_as_failure(requests_mock, tmp_path):
@@ -543,21 +517,22 @@ def test_argus_client_post_records_401_unauthenticated_as_failure(requests_mock,
         text="Unauthorized",
         status_code=401,
     )
-    client = ArgusClient(
+    client = ArgusReplayLogClient(
         auth_token="t",
         base_url="https://test.example.com",
         log_dir=tmp_path,
     )
     client.post(
-        endpoint=ArgusClient.Routes.SUBMIT,
+        endpoint=ArgusReplayLogClient.Routes.SUBMIT,
         location_params={"type": "test-type"},
         body={},
     )
     client.close()
 
     records = _read_records(client.replay_log_path)
-    assert records[-1]["success"] is False
-    assert records[-1]["error"] == "HTTP 401"
+    assert len(records) == 1
+    assert records[0]["success"] is False
+    assert records[0]["error"] == "HTTP 401"
 
 
 def test_argus_client_post_records_exception_on_connection_failure(requests_mock, tmp_path):
@@ -566,36 +541,36 @@ def test_argus_client_post_records_exception_on_connection_failure(requests_mock
         "https://test.example.com/api/v1/client/testrun/test-type/submit",
         exc=_requests.ConnectionError("connection refused"),
     )
-    client = ArgusClient(
+    client = ArgusReplayLogClient(
         auth_token="t",
         base_url="https://test.example.com",
         log_dir=tmp_path,
     )
     with pytest.raises(Exception):
         client.post(
-            endpoint=ArgusClient.Routes.SUBMIT,
+            endpoint=ArgusReplayLogClient.Routes.SUBMIT,
             location_params={"type": "test-type"},
             body={},
         )
     client.close()
 
     records = _read_records(client.replay_log_path)
-    assert len(records) == 2
-    assert records[-1]["success"] is False
-    assert "ConnectionError" in records[-1]["error"]
+    assert len(records) == 1
+    assert records[0]["success"] is False
+    assert "ConnectionError" in records[0]["error"]
 
 
 def test_argus_client_replay_log_only_mode_skips_http_but_records(tmp_path):
     # replay-log-only skips the HTTP call but still records the request so a
     # future replay (Phase 5) can re-send it once Argus is reachable.
-    client = ArgusClient(
+    client = ArgusReplayLogClient(
         auth_token="t",
         base_url="https://unreachable.invalid",
         log_dir=tmp_path,
         replay_log_only=True,
     )
     response = client.post(
-        endpoint=ArgusClient.Routes.SUBMIT,
+        endpoint=ArgusReplayLogClient.Routes.SUBMIT,
         location_params={"type": "test-type"},
         body={"k": "v"},
     )
@@ -604,26 +579,25 @@ def test_argus_client_replay_log_only_mode_skips_http_but_records(tmp_path):
     client.close()
 
     records = _read_records(client.replay_log_path)
-    assert len(records) == 2
-    for r in records:
-        assert r["endpoint"] == ArgusClient.Routes.SUBMIT
-        assert r["location_params"] == {"type": "test-type"}
-        assert r["body"] == {"k": "v"}
+    assert len(records) == 1
+    assert records[0]["endpoint"] == ArgusReplayLogClient.Routes.SUBMIT
+    assert records[0]["location_params"] == {"type": "test-type"}
+    assert records[0]["body"] == {"k": "v"}
     # No HTTP call was made, so it has not succeeded -- replay must re-send it.
-    assert records[-1]["success"] is False
+    assert records[0]["success"] is False
 
 
 def test_argus_client_replay_log_only_get_returns_stub(tmp_path):
     # In replay-log-only mode GET acts as a mock instead of raising, so
     # callers (e.g. SCT tests that previously used ``MagicMock``) do not
     # have to special-case it.
-    client = ArgusClient(
+    client = ArgusReplayLogClient(
         auth_token="t",
         base_url="https://unreachable.invalid",
         log_dir=tmp_path,
         replay_log_only=True,
     )
-    response = client.get(endpoint=ArgusClient.Routes.GET, location_params={"type": "t", "id": "1"})
+    response = client.get(endpoint=ArgusReplayLogClient.Routes.GET, location_params={"type": "t", "id": "1"})
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "response": {}}
     client.close()
@@ -640,4 +614,21 @@ def test_argus_client_replay_log_path_includes_run_id_when_set(tmp_path):
     )
     assert str(run_id) in client.replay_log_path.name
     assert "scylla-cluster-tests" not in client.replay_log_path.name  # test_type isn't in filename
+    client.close()
+
+
+def test_argus_client_is_backwards_compatible_alias_for_replay_log_client(tmp_path):
+    # ``ArgusClient`` used to be the only client class, always carrying a
+    # replay log -- kept as an alias for ``ArgusReplayLogClient`` so existing
+    # code importing/constructing it does not break.
+    assert ArgusClient is ArgusReplayLogClient
+
+    client = ArgusClient(
+        auth_token="t",
+        base_url="https://test.example.com",
+        log_dir=tmp_path,
+        replay_log_only=True,
+    )
+    response = client.get(endpoint=ArgusClient.Routes.GET, location_params={"type": "t", "id": "1"})
+    assert response.status_code == 200
     client.close()

@@ -1,15 +1,15 @@
 import logging
-from argus.client.base import ArgusClient
+from argus.client.base import ArgusReplayLogClient
 
 
 LOGGER = logging.getLogger(__name__)
 
 
-class ArgusGenericClient(ArgusClient):
+class ArgusGenericClient(ArgusReplayLogClient):
     test_type = "generic"
     schema_version: None = "v1"
 
-    class Routes(ArgusClient.Routes):
+    class Routes(ArgusReplayLogClient.Routes):
         TRIGGER_JOBS = "/planning/plan/trigger"
 
     def __init__(self, auth_token: str, base_url: str, log_dir, api_version="v1",

@@ -10,7 +10,7 @@ import requests
 from argus.common.enums import TestStatus
 from argus.client.session import create_session
 from argus.client.generic_result import GenericResultTable
-from argus.client.replay_log import ReplayLog, ReplayLogOnlyResponse
+from argus.client.replay_log import ReplayLog, ReplayLogOnlyResponse, classify_response
 from argus.client.sct.types import LogLink
 
 JSON = dict[str, Any] | list[Any] | int | str | float | bool | Type[None]
@@ -21,7 +21,15 @@ class ArgusClientError(Exception):
     pass
 
 
-class ArgusClient:
+class ArgusAPIClient:
+    """Plain Argus HTTP API client -- no replay log.
+
+    Use this directly when you just need the API surface (tests, one-off
+    scripts, read-only tools). Production consumers that need resilience to
+    Argus outages should use :class:`ArgusReplayLogClient` instead, which
+    adds a replay log transparently around the same ``get()``/``post()``.
+    """
+
     schema_version: str | None = None
 
     class Routes():
@@ -38,52 +46,38 @@ class ArgusClient:
 
     # Subclasses override ``test_type`` as a class attribute; ``run_id`` is
     # set on the instance by subclass constructors. Both are surfaced in the
-    # replay-log filename.
+    # replay-log filename by ``ArgusReplayLogClient``.
     test_type: str | None = None
 
-    def __init__(self, auth_token: str, base_url: str, log_dir: str | Path, api_version="v1",
+    def __init__(self, auth_token: str, base_url: str, api_version="v1",
                  extra_headers: dict | None = None, timeout: int = 60, max_retries: int = 3,
-                 use_tunnel: bool | None = None, replay_log_only: bool = False,
-                 run_id: UUID | str | None = None) -> None:
+                 use_tunnel: bool | None = None, run_id: UUID | str | None = None) -> None:
+        self._set_attrs(auth_token=auth_token, base_url=base_url, api_version=api_version,
+                        timeout=timeout, run_id=run_id)
+        self.session = create_session(
+            auth_token=auth_token,
+            base_url=base_url,
+            use_tunnel=use_tunnel,
+            max_retries=max_retries,
+        )
+        if extra_headers:
+            self.session.headers.update(extra_headers)
+
+    def _set_attrs(self, *, auth_token: str, base_url: str, api_version: str, timeout: int,
+                   run_id: UUID | str | None) -> None:
         self._auth_token = auth_token
         self._base_url = base_url
         self._api_ver = api_version
         self._timeout = timeout
-        self._replay_log_only = replay_log_only
         # Set run_id on the instance so subclasses that read ``self.run_id``
         # later see the explicit value, not the class-attribute default.
         if run_id is not None:
             self.run_id = run_id
-        # In replay-log-only mode no HTTP calls are made, so skip opening a
-        # session (and any SSH tunnel that might come with it).
-        if replay_log_only:
-            self.session = None
-        else:
-            self.session = create_session(
-                auth_token=auth_token,
-                base_url=base_url,
-                use_tunnel=use_tunnel,
-                max_retries=max_retries,
-            )
-            if extra_headers:
-                self.session.headers.update(extra_headers)
-
-        self._replay_log = ReplayLog(
-            log_dir=log_dir,
-            run_id=str(run_id) if run_id is not None else None,
-            test_type=self.test_type,
-        )
-
-    @property
-    def replay_log_path(self) -> Path:
-        return self._replay_log.path
 
     def close(self) -> None:
-        if self.session is not None:
-            self.session.close()
-        self._replay_log.close()
+        self.session.close()
 
-    def __enter__(self) -> "ArgusClient":
+    def __enter__(self) -> "ArgusAPIClient":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -141,12 +135,6 @@ class ArgusClient:
         }
 
     def get(self, endpoint: str, location_params: dict[str, str] = None, params: dict = None) -> requests.Response:
-        # In replay-log-only mode no HTTP call is made; behave like a mock so
-        # callers (e.g. SCT tests that previously used ``MagicMock``) do not
-        # have to special-case GETs.
-        if self._replay_log_only:
-            LOGGER.debug("GET [replay-log-only] %s params: %s", endpoint, params)
-            return ReplayLogOnlyResponse(endpoint=endpoint)
         url = self.get_url_for_endpoint(
             endpoint=endpoint,
             location_params=location_params
@@ -169,28 +157,20 @@ class ArgusClient:
         params: dict = None,
         body: dict = None,
     ) -> requests.Response:
-        with self._replay_log.record("POST", endpoint, location_params, params, body) as rec:
-            if self._replay_log_only:
-                # Record the request so a future replay can re-send it, but
-                # skip the HTTP call. ``rec`` stays at success=False (default).
-                LOGGER.debug("POST [replay-log-only] %s body: %s", endpoint, body)
-                return ReplayLogOnlyResponse(endpoint=endpoint)
-
-            url = self.get_url_for_endpoint(
-                endpoint=endpoint,
-                location_params=location_params
-            )
-            LOGGER.debug("POST Request: %s, params: %s, body: %s", url, params, body)
-            response = self.session.post(
-                url=url,
-                params=params,
-                json=body,
-                headers=self.request_headers,
-                timeout=self._timeout
-            )
-            LOGGER.debug("POST Response: %s %s", response.status_code, response.url)
-            rec.record(response)
-            return response
+        url = self.get_url_for_endpoint(
+            endpoint=endpoint,
+            location_params=location_params
+        )
+        LOGGER.debug("POST Request: %s, params: %s, body: %s", url, params, body)
+        response = self.session.post(
+            url=url,
+            params=params,
+            json=body,
+            headers=self.request_headers,
+            timeout=self._timeout
+        )
+        LOGGER.debug("POST Response: %s %s", response.status_code, response.url)
+        return response
 
     def submit_run(self, run_type: str, run_body: dict) -> requests.Response:
         return self.post(endpoint=self.Routes.SUBMIT, location_params={"type": run_type}, body={
@@ -293,3 +273,84 @@ class ArgusClient:
             }
         )
         self.check_response(response)
+
+
+class ArgusReplayLogClient(ArgusAPIClient):
+    """:class:`ArgusAPIClient` wrapped with an always-on JSONL replay log.
+
+    Every POST is recorded to ``log_dir`` before returning, so the call can
+    be replayed if Argus was unreachable. Production clients (SCT, Generic,
+    DriverMatrix, Sirenada) inherit from this instead of ``ArgusAPIClient``
+    directly. See ``docs/plans/request_replay.md`` for the full design.
+    """
+
+    def __init__(self, auth_token: str, base_url: str, log_dir: str | Path, api_version="v1",
+                 extra_headers: dict | None = None, timeout: int = 60, max_retries: int = 3,
+                 use_tunnel: bool | None = None, replay_log_only: bool = False,
+                 run_id: UUID | str | None = None) -> None:
+        # ``replay_log_only`` only ever means "skip the HTTP call" here -- it
+        # never decides whether a replay log exists, that's decided by using
+        # this class instead of ``ArgusAPIClient``.
+        self._replay_log_only = replay_log_only
+        if replay_log_only:
+            # Argus is known to be unreachable -- skip session/tunnel setup
+            # entirely rather than create a session that will never be used.
+            self._set_attrs(auth_token=auth_token, base_url=base_url, api_version=api_version,
+                            timeout=timeout, run_id=run_id)
+            self.session = None
+        else:
+            super().__init__(auth_token, base_url, api_version=api_version, extra_headers=extra_headers,
+                             timeout=timeout, max_retries=max_retries, use_tunnel=use_tunnel, run_id=run_id)
+
+        self._replay_log = ReplayLog(
+            log_dir=log_dir,
+            run_id=str(run_id) if run_id is not None else None,
+            test_type=self.test_type,
+        )
+
+    @property
+    def replay_log_path(self) -> Path:
+        return self._replay_log.path
+
+    def close(self) -> None:
+        if self.session is not None:
+            self.session.close()
+        self._replay_log.close()
+
+    def __enter__(self) -> "ArgusReplayLogClient":
+        return self
+
+    def get(self, endpoint: str, location_params: dict[str, str] = None, params: dict = None) -> requests.Response:
+        # In replay-log-only mode no HTTP call is made; behave like a mock so
+        # callers (e.g. SCT tests that previously used ``MagicMock``) do not
+        # have to special-case GETs.
+        if self._replay_log_only:
+            LOGGER.debug("GET [replay-log-only] %s params: %s", endpoint, params)
+            return ReplayLogOnlyResponse(endpoint=endpoint)
+        return super().get(endpoint, location_params=location_params, params=params)
+
+    def post(
+        self,
+        endpoint: str,
+        location_params: dict = None,
+        params: dict = None,
+        body: dict = None,
+    ) -> requests.Response:
+        with self._replay_log.record("POST", endpoint, location_params, params, body) as rec:
+            if self._replay_log_only:
+                # Record the request so a future replay can re-send it, but
+                # skip the HTTP call. ``rec`` stays at success=False (default).
+                LOGGER.debug("POST [replay-log-only] %s body: %s", endpoint, body)
+                return ReplayLogOnlyResponse(endpoint=endpoint)
+
+            response = super().post(endpoint, location_params=location_params, params=params, body=body)
+            rec["success"], rec["error"] = classify_response(response)
+            return response
+
+
+# Backwards-compatible alias -- ``ArgusClient`` used to be the single class
+# that both made HTTP calls and always carried a replay log. Existing code
+# constructing ``ArgusClient(..., log_dir=..., replay_log_only=...)`` keeps
+# working unchanged. New code should use ``ArgusAPIClient``/
+# ``ArgusReplayLogClient`` directly to make the replay-log dependency explicit.
+ArgusClient = ArgusReplayLogClient

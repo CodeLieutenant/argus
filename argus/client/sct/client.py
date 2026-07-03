@@ -5,16 +5,16 @@ from dataclasses import asdict
 from argus.common.email import RawAttachment, ReportSection, ReportSectionShortHand
 from argus.common.sct_types import GeminiResultsRequest, PerformanceResultsRequest, RawEventPayload
 from argus.common.enums import ResourceState, TestStatus
-from argus.client.base import ArgusClient
+from argus.client.base import ArgusReplayLogClient
 from argus.client.sct.types import EventsInfo, LogLink, Package
 from argus.common.utils import clamp_ts_to_milliseconds
 
 
-class ArgusSCTClient(ArgusClient):
+class ArgusSCTClient(ArgusReplayLogClient):
     test_type = "scylla-cluster-tests"
     schema_version: None = "v8"
 
-    class Routes(ArgusClient.Routes):
+    class Routes(ArgusReplayLogClient.Routes):
         SUBMIT_PACKAGES = "/sct/$id/packages/submit"
         SUBMIT_SCREENSHOTS = "/sct/$id/screenshots/submit"
         GET_RESOURCES = "/sct/$id/resource/all"
