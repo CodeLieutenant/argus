@@ -62,8 +62,6 @@ const (
 	PlanCreate      = "/api/v1/planning/plan/create"              // POST   – create a plan (CreatePlanRequest)
 	PlanUpdate      = "/api/v1/planning/plan/update"              // POST   – update a plan (PlanDiffRequest)
 	PlanDelete      = "/api/v1/planning/plan/%s/delete"           // DELETE – delete a plan (plan_id); query param deleteView=0|1
-	PlanCopy        = "/api/v1/planning/plan/copy"                // POST   – copy a plan (CopyPlanRequest)
-	PlanCopyCheck   = "/api/v1/planning/plan/%s/copy/check"       // GET    – copy eligibility (plan_id); query param releaseId
 	PlanResolve     = "/api/v1/planning/plan/%s/resolve_entities" // GET  – resolve plan entities (plan_id)
 	PlanningSearch  = "/api/v1/planning/search"                   // GET    – search tests/groups/releases; query params query, releaseId
 	GroupExplode    = "/api/v1/planning/group/%s/explode"         // GET    – explode a group into its tests (group_id)
@@ -72,4 +70,8 @@ const (
 	// Name-resolution routes
 	Releases = "/api/v1/releases" // GET – enabled releases (id/name); query param all=1 for every release
 	Users    = "/api/v1/users"    // GET – users keyed by id with username/full_name/email
+
+	// Replay-log ingest – uploads a tar.zst bundle of JSONL replay logs.
+	// POST – body is application/x-tar-zstd; query: dry_run=true|false.
+	ReplayIngest = "/api/v1/client/replay/ingest"
 )
