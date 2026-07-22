@@ -380,5 +380,5 @@ Tracked as 5 phases (`progress.json`); Zeus (§5.7) is an external service track
 | 1 | Backend worker | §5.1 `summary` column · §5.2 dispatch · §5.3 Summarizer + config · §6 per-call & aggregate metrics | **done** |
 | 2 | Evaluation harness | §7 prompt/model sweep, LLM judge, token-based cost/compression, HTML report | **done** |
 | 3 | Serving & tests | §5.4 (`SELECT *`, no code) · §8 backend serving test (`summary` in payload, `message` intact) done; integration test pending | in progress |
-| 4 | CLI | §5.6 Go `Summary` field, summary-first output, `--raw` | todo |
+| 4 | CLI | §5.6 Go `Summary` field, summary-first output, `--raw` | **done** |
 | 5 | Web UI | §5.5 Svelte toggle + per-user localStorage preference | todo |

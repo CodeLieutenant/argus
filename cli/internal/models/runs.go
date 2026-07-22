@@ -202,6 +202,7 @@ type SCTEvent struct {
 	EventID           string           `json:"event_id"`
 	EventType         string           `json:"event_type"`
 	Message           string           `json:"message"`
+	Summary           string           `json:"summary"`
 	DuplicateID       string           `json:"duplicate_id"`
 	Node              string           `json:"node"`
 	ReceivedTimestamp string           `json:"received_timestamp"`
@@ -794,6 +795,9 @@ func (f FetchResultsResponse) Tables() []output.NamedTable {
 type SCTEventsResponse struct {
 	RunID  string     `json:"run_id"`
 	Events []SCTEvent `json:"response"`
+	// Raw forces the table renderer to show the original message even when a
+	// summary is present. It is a rendering flag only and is never serialised.
+	Raw bool `json:"-"`
 }
 
 // Headers implements output.Tabular for SCTEventsResponse.
@@ -805,7 +809,13 @@ func (SCTEventsResponse) Headers() []string {
 func (r SCTEventsResponse) Rows() [][]string {
 	rows := make([][]string, 0, len(r.Events))
 	for _, e := range r.Events {
+		// Summary-first by default (§5.6): the CLI optimises for scripted/token
+		// consumers. --raw (r.Raw) forces the original; a missing summary falls
+		// back to the message so output is never blank.
 		msg := e.Message
+		if !r.Raw && e.Summary != "" {
+			msg = e.Summary
+		}
 		if len(msg) > 200 {
 			msg = msg[:200] + "..."
 		}
