@@ -1,0 +1,5 @@
+# Local eval working files — never commit outputs, working configs, or anything key-adjacent
+out/
+out_*/
+config.yaml
+*.local.yaml
