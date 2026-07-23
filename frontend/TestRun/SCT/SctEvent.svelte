@@ -3,7 +3,7 @@
     import { timestampToISODate } from "../../Common/DateUtils";
     import type { EventSeverityFilter, Options, SCTEvent } from "./SctEvents.svelte";
     import Fa from "svelte-fa";
-    import { faClipboard, faClock, faCopy, faPlus, faSearch, faServer, faSpider, faTable } from "@fortawesome/free-solid-svg-icons";
+    import { faClipboard, faClock, faCopy, faPlus, faRobot, faSearch, faServer, faSpider, faTable } from "@fortawesome/free-solid-svg-icons";
     import SctSimilarEvents from "./SctSimilarEvents.svelte";
     import { sendMessage } from "../../Stores/AlertStore";
     import type { GithubSubtype, JiraSubtype } from "../../Github/Issues.svelte";
@@ -158,6 +158,28 @@
 
     let fullMessage = $state(false);
     let parsedMessage = $derived(parseEventMessage(event.message));
+
+    // AI summary view (§5.5). The original message is always the source of truth; the summary
+    // is opt-in. Which view renders first is a per-user preference stored in localStorage
+    // (default: original-first). When there is no summary, the event renders exactly as before.
+    const SUMMARY_PREF_KEY = "argus.sctEvent.summaryFirst";
+    const summaryFirstPref = function (): boolean {
+        try {
+            return window.localStorage.getItem(SUMMARY_PREF_KEY) === "true";
+        } catch {
+            return false;
+        }
+    };
+    let hasSummary = $derived(!!event.summary && event.summary.trim().length > 0);
+    let showSummary = $state(summaryFirstPref());
+    const toggleSummaryView = function () {
+        showSummary = !showSummary;
+        try {
+            window.localStorage.setItem(SUMMARY_PREF_KEY, String(showSummary));
+        } catch {
+            // localStorage unavailable (e.g. private mode) — the choice is session-only.
+        }
+    };
 
     const shouldFilter = function (filterString: string) {
         if (!filterString) return false;
@@ -363,7 +385,20 @@
             </div>
         </div>
         <div class:duplicate-body={isDuplicate(event)} class="bg-body p-2">
-            <pre class="font-monospace p-2 rounded m-1 bg-light-two" style="white-space: pre-wrap !important">{sliceMessage(event.message)} {#if event.message.length > MESSAGE_CUTOFF}<button class="btn btn-sm btn-light" onclick={() => fullMessage = !fullMessage}>{#if fullMessage}X{:else}...{/if}</button>{/if}</pre>
+            {#if hasSummary && showSummary}
+                <div class="d-flex align-items-center mb-1 ms-1">
+                    <span class="badge bg-info text-dark me-2"><Fa icon={faRobot}/> AI summary</span>
+                    <button class="btn btn-sm btn-light" onclick={toggleSummaryView}>Show original</button>
+                </div>
+                <pre class="font-monospace p-2 rounded m-1 bg-light-two" style="white-space: pre-wrap !important">{event.summary}</pre>
+            {:else}
+                {#if hasSummary}
+                    <div class="mb-1 ms-1">
+                        <button class="btn btn-sm btn-light" onclick={toggleSummaryView}><Fa icon={faRobot}/> Show AI summary</button>
+                    </div>
+                {/if}
+                <pre class="font-monospace p-2 rounded m-1 bg-light-two" style="white-space: pre-wrap !important">{sliceMessage(event.message)} {#if event.message.length > MESSAGE_CUTOFF}<button class="btn btn-sm btn-light" onclick={() => fullMessage = !fullMessage}>{#if fullMessage}X{:else}...{/if}</button>{/if}</pre>
+            {/if}
         </div>
     </div>
 </div>

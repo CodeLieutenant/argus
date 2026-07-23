@@ -198,6 +198,7 @@ Only SCT runs have per-event records; for other plugin types use
 		beforeRaw, _ := cmd.Flags().GetString("before")
 		afterRaw, _ := cmd.Flags().GetString("after")
 		limit, _ := cmd.Flags().GetInt("limit")
+		raw, _ := cmd.Flags().GetBool("raw")
 
 		log.Debug().
 			Str("run_id", runID).
@@ -247,7 +248,7 @@ Only SCT runs have per-event records; for other plugin types use
 		allEvents = deduplicateEvents(allEvents)
 
 		log.Info().Str("run_id", runID).Int("total_events", len(allEvents)).Msg("SCT events fetched successfully")
-		return out.Write(models.SCTEventsResponse{RunID: runID, Events: allEvents})
+		return out.Write(models.SCTEventsResponse{RunID: runID, Events: allEvents, Raw: raw})
 	},
 }
 
@@ -471,6 +472,7 @@ func init() {
 	runEventsCmd.Flags().String("before", "", "Only events before this time (Unix timestamp, RFC3339, or YYYY-MM-DD)")
 	runEventsCmd.Flags().String("after", "", "Only events after this time (Unix timestamp, RFC3339, or YYYY-MM-DD)")
 	runEventsCmd.Flags().Int("limit", 100, "Maximum events per severity level to return")
+	runEventsCmd.Flags().Bool("raw", false, "Show the original event message instead of the AI summary")
 	_ = runEventsCmd.MarkFlagRequired("run-id")
 
 	// run nemeses

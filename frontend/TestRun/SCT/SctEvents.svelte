@@ -7,6 +7,7 @@
         duplicate_id: string;
         event_type: string;
         message: string;
+        summary?: string | null;
         node?: string;
         received_timestamp?: string;
         nemesis_name?: string;
