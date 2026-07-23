@@ -12,13 +12,11 @@ This module processes SCT events by:
 from collections import namedtuple
 import logging
 import time
-from pathlib import Path
 from threading import Event
 from typing import Literal
 from uuid import UUID
 from datetime import datetime
 
-from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
 from chromadb.utils.distance_functions import cosine
 from numpy import array
 
@@ -26,7 +24,8 @@ from argus.backend.models.argus_ai import SCTCriticalEventEmbedding, SCTErrorEve
 from argus.backend.plugins.sct.testrun import SCTUnprocessedEvent, SCTEvent
 from argus.backend.util.logsetup import setup_application_logging
 from argusAI.utils.scylla_connection import ScyllaConnection
-from argusAI.utils.event_message_sanitizer import MessageSanitizer
+from argusAI.utils.embedding import EventEmbedder
+from argusAI.utils.summary_dispatcher import SummaryDispatcher
 
 LOGGER = logging.getLogger(__name__)
 SLEEP_INTERVAL = 1  # Sleep for 1 second between processing cycles
@@ -34,23 +33,6 @@ SLEEP_INTERVAL = 1  # Sleep for 1 second between processing cycles
 SimilarEvent = namedtuple("SimilarEvent", ["run_id", "ts", "embedding", "added_ts"])
 Severity = Literal["ERROR", "CRITICAL"]
 RunIdStr = str
-
-
-class BgeSmallEnEmbeddingModel(ONNXMiniLM_L6_V2):
-    """
-    Compact English text embedding model by BAAI, released Sep 2023.
-    Trained on large-scale paired data with RetroMAE and contrastive learning.
-    Produces high-quality 384-dim embeddings, optimized for efficiency in semantic search, classification, and clustering.
-    """
-
-    MODEL_NAME: str = "bge-small-en-v1.5"
-    DOWNLOAD_PATH: Path = Path.home() / ".cache" / "chroma" / "onnx_models" / MODEL_NAME
-    EXTRACTED_FOLDER_NAME: str = "onnx"
-    ARCHIVE_FILENAME: str = "onnx.tar.gz"
-    MODEL_DOWNLOAD_URL: str = (
-        "https://scylla-qa-public.s3.us-east-1.amazonaws.com/ArgusAI/bge-small-en-v1.5/onnx.tar.gz"
-    )
-    _MODEL_SHA256: str = "e7d1743b0c08f55c687cff6af696683398682f9ab4fb3cad1be644ee5553a72d"
 
 
 class EventSimilarityProcessorV2:
@@ -65,8 +47,7 @@ class EventSimilarityProcessorV2:
         Args:
             stop_event: Optional threading.Event to signal shutdown
         """
-        self.embedding_model = BgeSmallEnEmbeddingModel()
-        self.sanitizer = MessageSanitizer()
+        self.embedder = EventEmbedder()
         self.stop_event = stop_event or Event()
         self.db = ScyllaConnection()
         self.processed_count = 0
@@ -78,6 +59,10 @@ class EventSimilarityProcessorV2:
             or SCTErrorEventEmbedding.__keyspace__
             or self.db.config["SCYLLA_KEYSPACE_NAME"]
         )
+        # Best-effort summarization of unique events, dispatched from the per-event pipeline.
+        # Inert unless EVENT_SUMMARIZATION_ENABLED and OPENAI_API_KEY are configured; the
+        # embedding path is never blocked or altered by it.
+        self.summary_dispatcher = SummaryDispatcher(self.db, self.db.config)
         LOGGER.info("EventSimilarityProcessorV2 initialized")
 
     def _clear_stale_cache(self):
@@ -260,30 +245,20 @@ class EventSimilarityProcessorV2:
             LOGGER.warning(f"Event has no message: run_id={run_id}, severity={severity}, ts={ts}")
             raise ValueError("Event message is empty")
 
-        # Step 2: Sanitize event message
+        # Step 2-3: Sanitize the message and generate its embedding (shared with the eval).
         try:
-            sanitized_message = self.sanitizer.sanitize(run_id, message)
+            embedding = self.embedder.embed(message, run_id)
         except Exception as e:
-            LOGGER.error(f"Failed to sanitize message for event (run_id={run_id}): {e}", exc_info=True)
-            raise
-
-        if not sanitized_message or not sanitized_message.strip():
-            LOGGER.warning(f"Sanitized message is empty for event: run_id={run_id}, severity={severity}, ts={ts}")
-            raise ValueError("Sanitized message is empty")
-
-        # Step 3: Generate embedding
-        try:
-            embeddings = self.embedding_model([sanitized_message])
-            if not embeddings or len(embeddings) == 0:
-                raise ValueError("Embedding generation returned empty result")
-            embedding = embeddings[0]
-        except Exception as e:
-            LOGGER.error(f"Failed to generate embedding for event (run_id={run_id}): {e}", exc_info=True)
+            LOGGER.error(f"Failed to embed event (run_id={run_id}): {e}", exc_info=True)
             raise
 
         # Step 3.5: Check if event is duplicate, cancel remaining steps if it is.
         if self._mark_event_is_duplicate(run_id, ts, severity, embedding):
             return
+
+        # Step 3.6: Event is unique — dispatch summarization of the RAW message (not the
+        # sanitized one) as a fire-and-forget background task. Never blocks Step 4.
+        self.summary_dispatcher.dispatch(run_id, severity, ts, message)
 
         # Step 4: Store embedding in severity-specific table
         try:
@@ -318,6 +293,8 @@ class EventSimilarityProcessorV2:
     def shutdown(self) -> None:
         """Shutdown the processor and cleanup resources."""
         self.stop_event.set()
+        # Drain in-flight summarization tasks before closing the DB they write through.
+        self.summary_dispatcher.shutdown()
         self.db.shutdown()
         LOGGER.info("EventSimilarityProcessorV2 shutdown complete")
 
